@@ -1,2 +1,4 @@
-# vlagentonix
+# Vlagentonix
 Multi Agent System
+
+## Education
