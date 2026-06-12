@@ -1,0 +1,4 @@
+langchain
+langchain-openrouter
+python-dotenv
+requests
