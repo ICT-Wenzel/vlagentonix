@@ -1,2 +1,3 @@
 crewai
 crewai-tools
+crewai_tools
