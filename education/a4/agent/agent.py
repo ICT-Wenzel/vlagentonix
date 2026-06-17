@@ -1,6 +1,8 @@
 import os
+import sys
 import requests
-from crewai import Agent, Task, Crew, Process, LLM
+
+from crewai import Agent, Task, Crew, Process, LLM, Memory
 from crewai.tools import tool
 from crewai_tools import DirectoryReadTool, FileReadTool
 
@@ -13,7 +15,14 @@ TRELLO_API_KEY  = os.getenv("TRELLO_API_KEY")
 TRELLO_TOKEN = os.getenv("TRELLO_API_TOKEN")
 TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID")
 
+
 directory_limit = "./files"
+
+AGENT_LLM    = "openrouter/anthropic/claude-sonnet-4-6"
+ANALYSIS_LLM = "openrouter/anthropic/claude-sonnet-4-6"
+ 
+EMBED_MODEL = "text-embedding-3-large"
+TRELLO_MEMORY_DIR  = os.getenv("TRELLO_MEMORY_DIR", "./trello_memory")
 # ======================================================================
 # 2. TOOLS
 # ======================================================================
@@ -144,7 +153,6 @@ def create_trello_card(name: str, description: str, list_id: str) -> str:
     return f"Card '{card['name']}' was created in list '{list_id}'."
  
  
-
 # ======================================================================
 # 3. AGENT
 # ======================================================================
@@ -226,9 +234,18 @@ trello_agent = Agent(
 
  
 # ======================================================================
-# 5. CALL
+# 4. CALL
 # ======================================================================
 def main() -> None:
+    if "--reset" in sys.argv:
+        import shutil
+        if os.path.isdir(TRELLO_MEMORY_DIR):
+            shutil.rmtree(TRELLO_MEMORY_DIR)
+            print(f"Memory folder '{TRELLO_MEMORY_DIR}' deleted.")
+        else:
+            print(f"No memory folder found at '{TRELLO_MEMORY_DIR}'.")
+        return
+
     inputs = {
         "target_directory": "/todo_folder"
     }
@@ -247,11 +264,22 @@ def main() -> None:
         ),
         agent=trello_agent,
     )
-
+    
+    memory = Memory(
+        llm="gpt-4",
+        embedder={
+            "provider": "openai",
+            "config": {
+                "model_name": "text-embedding-3-large",
+                "api_key": OPENAI_API_KEY,
+                }
+        }   
+    )
     crew = Crew(
         agents=[trello_agent],
         tasks=[to_do_task],
         process=Process.sequential,
+        memory=memory,
         verbose=True,
     )
 
