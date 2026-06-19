@@ -15,14 +15,15 @@ TRELLO_API_KEY  = os.getenv("TRELLO_API_KEY")
 TRELLO_TOKEN = os.getenv("TRELLO_API_TOKEN")
 TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID")
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 directory_limit = "./files"
-
-AGENT_LLM    = "openrouter/anthropic/claude-sonnet-4-6"
-ANALYSIS_LLM = "openrouter/anthropic/claude-sonnet-4-6"
  
 EMBED_MODEL = "text-embedding-3-large"
 TRELLO_MEMORY_DIR  = os.getenv("TRELLO_MEMORY_DIR", "./trello_memory")
+
+
+
 # ======================================================================
 # 2. TOOLS
 # ======================================================================
@@ -227,14 +228,57 @@ trello_agent = Agent(
         "</examples>"
     ),
     tools=[get_trello_lists, create_trello_card, read_directory, read_file],
-    llm=LLM(model="openrouter/anthropic/claude-sonnet-4-6"),
+    llm=LLM(model="openai/gpt-4"),
     verbose=True,
 )
  
 
- 
+
 # ======================================================================
-# 4. CALL
+# 4. TASK
+# ======================================================================
+inputs = {
+        "target_directory": "/todo_folder"
+    }
+
+to_do_task = Task(
+    name="Scan directory and decompose Markdown to-dos into Trello cards",
+    description=(
+        "Scan the directory '{target_directory}' for all Markdown (.md) files. "
+        "Read the text content of each file, extract the raw to-do items, "
+        "decompose them into concrete subtasks (1-2 hours each), and create "
+        "a Trello card for each subtask in the correct list."
+    ),
+    expected_output=(
+        "A summary of the processed Markdown files, the tasks found inside them, "
+        "and a list of the created Trello cards, ending with 'X cards created successfully'."
+    ),
+    agent=trello_agent,
+)
+
+
+
+# ======================================================================
+# 5. CREW
+# ======================================================================
+memory = Memory(embedder={
+    "provider": "openai",
+    "config": {
+        "model_name": "text-embedding-3-large",
+    },
+})
+crew = Crew(
+    agents=[trello_agent],
+    tasks=[to_do_task],
+    process=Process.sequential,
+    memory=memory,
+    verbose=True,
+)
+
+
+
+# ======================================================================
+# 6. CALL
 # ======================================================================
 def main() -> None:
     if "--reset" in sys.argv:
@@ -245,43 +289,6 @@ def main() -> None:
         else:
             print(f"No memory folder found at '{TRELLO_MEMORY_DIR}'.")
         return
-
-    inputs = {
-        "target_directory": "/todo_folder"
-    }
-
-    to_do_task = Task(
-        name="Scan directory and decompose Markdown to-dos into Trello cards",
-        description=(
-            "Scan the directory '{target_directory}' for all Markdown (.md) files. "
-            "Read the text content of each file, extract the raw to-do items, "
-            "decompose them into concrete subtasks (1-2 hours each), and create "
-            "a Trello card for each subtask in the correct list."
-        ),
-        expected_output=(
-            "A summary of the processed Markdown files, the tasks found inside them, "
-            "and a list of the created Trello cards, ending with 'X cards created successfully'."
-        ),
-        agent=trello_agent,
-    )
-    
-    memory = Memory(
-        llm="gpt-4",
-        embedder={
-            "provider": "openai",
-            "config": {
-                "model_name": "text-embedding-3-large",
-                "api_key": OPENAI_API_KEY,
-                }
-        }   
-    )
-    crew = Crew(
-        agents=[trello_agent],
-        tasks=[to_do_task],
-        process=Process.sequential,
-        memory=memory,
-        verbose=True,
-    )
 
     result = crew.kickoff(inputs=inputs)
     print(result)
