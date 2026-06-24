@@ -20,12 +20,34 @@ TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 directory_limit = "./files"
+ 
+EMBED_MODEL = "text-embedding-3-large"
+TRELLO_MEMORY_DIR  = os.getenv("TRELLO_MEMORY_DIR", "./trello_memory")
 
 
-TRELLO_MEMORY_DIR = os.getenv("TRELLO_MEMORY_DIR", "./trello_memory")
-os.environ["CREWAI_STORAGE_DIR"] = os.path.abspath(TRELLO_MEMORY_DIR)
+
 # ======================================================================
-# 2. TOOLS
+# 2. Output
+# ======================================================================
+class TrelloCard(BaseModel):
+    name: str = Field(description="The title of the created card")
+    list_id: str = Field(description="The ID of the list the card was created in")
+    list_name: str = Field(description="The name of the list")
+    source_file: str = Field(description="The Markdown file the task originated from")
+
+class ProcessedFile(BaseModel):
+    filename: str = Field(description="Name of the processed Markdown file")
+    tasks_found: List[str] = Field(description="The raw to-do items from the file")
+
+class TrelloResult(BaseModel):
+    processed_files: List[ProcessedFile] = Field(description="All processed files")
+    created_cards: List[TrelloCard] = Field(description="All created Trello cards")
+    total_cards_created: int = Field(description="Total number of created cards")
+    summary: str = Field(description="Brief summary of the run")
+
+
+# ======================================================================
+# 3. TOOLS
 # ======================================================================
 @tool("read_directory")
 def read_directory(path: str) -> str:
@@ -93,16 +115,15 @@ def read_file(path: str) -> str:
     except UnicodeDecodeError:
         return f"Error: '{path}' cannot be parsed as UTF-8 text (likely binary)."
 
-
 @tool("get_trello_lists")
 def get_trello_lists() -> str:
     """Return all lists on the Trello board with their names and IDs.
-
+ 
     Call this before create_trello_card to discover the available lists
     and their IDs. The ID returned here is exactly what must be passed
     as the list_id argument to create_trello_card. You cannot create a
     card without first retrieving a valid list ID from this tool.
-
+ 
     Returns:
         Each list as "name (ID: list_id)", comma-separated, e.g.
         "To Do (ID: 5abc123), Done (ID: 7ghi789)". Or an error message
@@ -110,23 +131,23 @@ def get_trello_lists() -> str:
     """
     url = f"https://api.trello.com/1/boards/{TRELLO_BOARD_ID}/lists"
     params = {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN}
-
+ 
     response = requests.get(url, params=params)
     response.raise_for_status()
-
+ 
     lists = response.json()
     eintraege = [f"{entry['name']} (ID: {entry['id']})" for entry in lists]
     return "Available lists: " + ", ".join(eintraege)
-
-
+ 
+ 
 @tool("create_trello_card")
 def create_trello_card(name: str, description: str, list_id: str) -> str:
     """Create a single Trello card in the specified list.
-
+ 
     For each individual subtask, call this tool exactly once - do not
     batch multiple tasks into one call. To create several cards,
     call this tool multiple times.
-
+ 
     Args:
         name: Short, actionable card title, e.g. "Design login page mockup".
             Keep it concise; put any detail into the description.
@@ -135,7 +156,7 @@ def create_trello_card(name: str, description: str, list_id: str) -> str:
         list_id: The ID of the target list. Call get_trello_lists first to
             retrieve both the list names and their IDs, then use the correct
             ID for this parameter. Do not guess or construct IDs.
-
+ 
     Returns:
         A confirmation with the card's title and ID, or an error message
         if the list ID is invalid or the board is inaccessible.
@@ -148,15 +169,15 @@ def create_trello_card(name: str, description: str, list_id: str) -> str:
         "key": TRELLO_API_KEY,
         "token": TRELLO_TOKEN,
     }
-
+ 
     response = requests.post(cards_url, params=data)
     response.raise_for_status()
     card = response.json()
     return f"Card '{card['name']}' was created in list '{list_id}'."
-
-
+ 
+ 
 # ======================================================================
-# 3. AGENT
+# 4. AGENT
 # ======================================================================
 trello_agent = Agent(
     role="File-Based Task Decomposition Specialist for Trello",
@@ -164,8 +185,7 @@ trello_agent = Agent(
         "Scan a designated to-do directory for Markdown (.md) files, extract "
         "the raw to-do items from them, decompose each item into concrete, "
         "actionable subtasks (roughly 1-2 hours of focused work each), and create "
-        "exactly one Trello card per subtask in the most appropriate list — but "
-        "ONLY for subtasks you have not already created in a previous run. You "
+        "exactly one Trello card per subtask in the most appropriate list. You "
         "plan and organize work — you never execute the tasks themselves."
     ),
     backstory=(
@@ -174,8 +194,7 @@ trello_agent = Agent(
         "text files into dynamic project boards. Teams leave their raw notes, "
         "brain dumps, and markdown checklists in a specific folder. Your job is to "
         "systematically ingest these files, find the tasks inside, and build a "
-        "clean, well-scoped Trello board from them. You are run repeatedly on the "
-        "same folder, so you must never recreate work you have already done.\n"
+        "clean, well-scoped Trello board from them.\n"
         "</background>\n\n"
 
         "<operating_principles>\n"
@@ -195,22 +214,6 @@ trello_agent = Agent(
         "progress easiest to track.\n"
         "</operating_principles>\n\n"
 
-        "<memory_usage>\n"
-        "You have a PERSISTENT memory that survives across runs. This is critical, "
-        "because you are run on the same folder again and again and must not create "
-        "duplicate cards.\n"
-        "- Before creating ANY card, recall from your memory which cards you created "
-        "in previous runs (titles and the files/items they came from).\n"
-        "- For every subtask you derive, decide: is this essentially the same as a "
-        "card I already created in an earlier run? If yes, DO NOT create it again — "
-        "skip it and record it as 'already exists'. Only call create_trello_card for "
-        "genuinely NEW subtasks.\n"
-        "- At the END of your work, output an explicit, structured list of every card "
-        "you created in THIS run (title + target list) and every subtask you skipped "
-        "as a duplicate. This recap is what gets remembered for next time, so be "
-        "precise and complete.\n"
-        "</memory_usage>\n\n"
-
         "<tool_usage>\n"
         "- Step 1: Call get_trello_lists exactly ONCE at the very beginning to gather "
         "valid list IDs. Never guess or fabricate a list_id.\n"
@@ -218,9 +221,8 @@ trello_agent = Agent(
         "Identify all files ending with '.md'.\n"
         "- Step 3: For each Markdown file found, call read_file to extract its raw text content. "
         "Do not guess file content; read it entirely.\n"
-        "- Step 4: Decompose the tasks. For each resulting subtask, first check your "
-        "memory for an existing equivalent card. Only call create_trello_card for new "
-        "subtasks, passing a real list_id from Step 1.\n"
+        "- Step 4: Process the extracted text, decompose the tasks, and use create_trello_card "
+        "for each resulting subtask, passing a real list_id from Step 1.\n"
         "- Pick the target list by matching the subtask's stage or category to the "
         "list names returned by get_trello_lists. If none clearly fits, use the "
         "most general 'To Do'/'Backlog'-style list.\n"
@@ -235,20 +237,13 @@ trello_agent = Agent(
         "<examples>\n"
         "# Note: list names below are illustrative; always use the actual names "
         "returned by get_trello_lists.\n\n"
-        "Example 1 — First run, complete workflow from directory to cards:\n"
+        "Example 1 — Complete workflow from directory to cards:\n"
         "1. get_trello_lists called -> Returns list 'To Do' (ID: 123).\n"
         "2. read_directory called for '.' -> Returns ['backlog.md', 'script.py'].\n"
         "3. read_file called for 'backlog.md' -> Content is: '- Prepare Q3 presentation'\n"
-        "4. Memory recall: nothing created before.\n"
-        "5. Decomposition: 'Prepare Q3 presentation' is too large.\n"
-        "6. Cards created: 'Gather Q3 metrics' (ID 123), 'Draft slide outline' (ID 123).\n\n"
-        "Example 2 — Second run on the SAME folder (memory in play):\n"
-        "1-3. Same files read; 'backlog.md' still says '- Prepare Q3 presentation'.\n"
-        "4. Memory recall: 'Gather Q3 metrics' and 'Draft slide outline' were already "
-        "created last run.\n"
-        "5. Decision: both subtasks already exist -> create NO new cards, report them "
-        "as skipped duplicates.\n\n"
-        "Example 3 — Empty directory or no markdown files:\n"
+        "4. Decomposition: 'Prepare Q3 presentation' is too large.\n"
+        "5. Cards created: 'Gather Q3 metrics' (ID 123), 'Draft slide outline' (ID 123).\n\n"
+        "Example 2 — Empty directory or no markdown files:\n"
         "Action: read_directory returns only binary files or is empty.\n"
         "Response: Report 'No Markdown (.md) files found in the directory to process.' "
         "Create no cards.\n"
@@ -258,39 +253,36 @@ trello_agent = Agent(
     llm=LLM(model="openai/gpt-4"),
     verbose=True,
 )
+ 
 
 
 # ======================================================================
-# 4. TASK
+# 5. TASK
 # ======================================================================
 inputs = {
-    "target_directory": "/todo_folder"
-}
+        "target_directory": "/todo_folder"
+    }
 
 to_do_task = Task(
     name="Scan directory and decompose Markdown to-dos into Trello cards",
     description=(
         "Scan the directory '{target_directory}' for all Markdown (.md) files. "
-        "Read the text content of each file and extract the raw to-do items. "
-        "Before creating anything, recall from your persistent memory which cards "
-        "you already created in previous runs. Decompose the items into concrete "
-        "subtasks (1-2 hours each), then create a Trello card ONLY for each "
-        "subtask that does not already exist from a previous run. Skip subtasks "
-        "that are equivalent to cards you created before."
+        "Read the text content of each file, extract the raw to-do items, "
+        "decompose them into concrete subtasks (1-2 hours each), and create "
+        "a Trello card for each subtask in the correct list."
     ),
     expected_output=(
-        "A summary containing: (1) which Markdown files were processed, (2) the "
-        "subtasks found inside them, (3) which subtasks were SKIPPED because an "
-        "equivalent card already existed from a previous run, and (4) an explicit "
-        "list of every NEW Trello card created in this run (title + target list). "
-        "End with a line in the form 'X new cards created, Y skipped as duplicates'."
+        "A summary of the processed Markdown files, the tasks found inside them, "
+        "and a list of the created Trello cards, ending with 'X cards created successfully'."
     ),
     agent=trello_agent,
+    output_pydantic=TrelloResult
 )
 
 
+
 # ======================================================================
-# 5. CREW
+# 6. CREW
 # ======================================================================
 memory = Memory(embedder={
     "provider": "openai",
@@ -307,8 +299,9 @@ crew = Crew(
 )
 
 
+
 # ======================================================================
-# 6. CALL
+# 7. CALL
 # ======================================================================
 def main() -> None:
     if "--reset" in sys.argv:
@@ -322,7 +315,13 @@ def main() -> None:
 
     result = crew.kickoff(inputs=inputs)
     print(result)
+    structured = result.pydantic
+    print(structured.total_cards_created)
 
+    for card in structured.created_cards:
+        print(card.name, "->", card.list_name)
+
+    print(structured.model_dump_json(indent=2)) 
 
 if __name__ == "__main__":
     main()
