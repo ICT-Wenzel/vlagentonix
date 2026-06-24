@@ -1,0 +1,5 @@
+crewai
+crewai-tools
+crewai_tools
+pydantic>=2.0
+docker==7.1.0
